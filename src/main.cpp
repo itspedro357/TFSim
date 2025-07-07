@@ -1,14 +1,14 @@
-#include<systemc.h>
-#include<string>
-#include<vector>
-#include<map>
-#include<fstream>
-#include<nana/gui.hpp>
-#include<nana/gui/widgets/button.hpp>
-#include<nana/gui/widgets/menubar.hpp>
-#include<nana/gui/widgets/group.hpp>
-#include<nana/gui/widgets/textbox.hpp>
-#include<nana/gui/filebox.hpp>
+#include <systemc.h>
+#include <string>
+#include <vector>
+#include <map>
+#include <fstream>
+#include <nana/gui.hpp>
+#include <nana/gui/widgets/button.hpp>
+#include <nana/gui/widgets/menubar.hpp>
+#include <nana/gui/widgets/group.hpp>
+#include <nana/gui/widgets/textbox.hpp>
+#include <nana/gui/filebox.hpp>
 #include "top.hpp"
 #include "gui.hpp"
 #include <unistd.h>
@@ -19,29 +19,24 @@ using std::vector;
 using std::map;
 using std::fstream;
 
-
 const char* get_base_path(const char **argv) {
-    // 1. Try environment variable first
+    // (Função get_base_path mantida sem alterações)
     const char* env_path = getenv("TFSIM_BASE_PATH");
     if (env_path != NULL && env_path[0] != '\0') {
         return env_path;
     }
 
-    // 2. Fall back to argv[0] derivation
     static char base_path[PATH_MAX];
     char executable_path[PATH_MAX];
 
-    // Get path to executable (Linux/macOS specific)
     ssize_t len = readlink("/proc/self/exe", executable_path, sizeof(executable_path)-1);
     if (len == -1) {
-        // Fallback for systems without /proc/self/exe
         strncpy(executable_path, argv[0], sizeof(executable_path)-1);
         executable_path[sizeof(executable_path)-1] = '\0';
     } else {
         executable_path[len] = '\0';
     }
 
-    // Get directory containing executable
     char* dir = dirname(executable_path);
     strncpy(base_path, dir, sizeof(base_path)-1);
     base_path[sizeof(base_path)-1] = '\0';
@@ -54,11 +49,13 @@ int sc_main(int argc, char *argv[])
     using namespace nana;
     vector<string> instruction_queue;
     string bench_name = "";
-    int nadd,nmul,nls, n_bits, bpb_size, cpu_freq;
+    int nadd, nmul, nls, n_bits, bpb_size, cpu_freq, history_bits, counter_bits;
     nadd = 3;
     nmul = nls = 2;
     n_bits = 2;
     bpb_size = 4;
+    history_bits = 6; // Aumentado para 64 entradas
+    counter_bits = 2; // Aumentado para contadores de 3 bits
     cpu_freq = 500; // definido em Mhz - 500Mhz default
     std::vector<int> sizes;
     bool spec = false;
@@ -84,12 +81,9 @@ int sc_main(int argc, char *argv[])
     clock_group.caption("Ciclo");
     clock_group.div("count");
     grid memory(fm,rectangle(),10,50);
-    // Tempo de latencia de uma instrucao
-    // Novas instrucoes devem ser inseridas manualmente aqui
     map<string,int> instruct_time{{"DADD",4},{"DADDI",4},{"DSUB",6},
     {"DSUBI",6},{"DMUL",10},{"DDIV",16},{"MEM",2},
     {"SLT",1},{"SGT", 1}};
-    // Responsavel pelos modos de execução
     top top1("top");
     start.caption("Start");
     clock_control.caption("Next cycle");
@@ -106,59 +100,74 @@ int sc_main(int argc, char *argv[])
     clock_group.collocate();
 
     spec = false;
-    //set_spec eh so visual
     set_spec(plc,spec);
     plc.collocate();
 
     mnbar.push_back("Opções");
     menu &op = mnbar.at(0);
-    //menu::item_proxy spec_ip = 
     op.append("Especulação");
     auto spec_sub = op.create_sub_menu(0);
-    // Modo com 1 preditor para todos os branchs
     spec_sub->append("1 Preditor", [&](menu::item_proxy &ip)
     {
         if(ip.checked()){
             spec = true;
             mode = 1;
             spec_sub->checked(1, false);
+            spec_sub->checked(2, false);
         }
         else{
             spec = false;
             mode = 0;
         }
-
         set_spec(plc,spec);
     });
-    // Modo com o bpb
     spec_sub->append("Branch Prediction Buffer", [&](menu::item_proxy &ip)
     {
         if(ip.checked()){
             spec = true;
             mode = 2;
             spec_sub->checked(0, false);
+            spec_sub->checked(2, false);
         }
         else{
             spec = false;
             mode = 0;
         }
-
         set_spec(plc, spec);
     });
+    spec_sub->append("Branch Local Predictor", [&](menu::item_proxy &ip)
+    {
+        if(ip.checked()){
+            spec = true;
+            mode = 3;
+            spec_sub->checked(0, false);
+            spec_sub->checked(1, false);
+        }
+        else{
+            spec = false;
+            mode = 0;
+        }
+        set_spec(plc, spec);
+    });
+
     spec_sub->check_style(0,menu::checks::highlight);
     spec_sub->check_style(1,menu::checks::highlight);
+    spec_sub->check_style(2,menu::checks::highlight);
 
     op.append("Modificar valores...");
-    // novo submenu para escolha do tamanho do bpb e do preditor
     auto sub = op.create_sub_menu(1);
-    sub->append("Tamanho do BPB e Preditor", [&](menu::item_proxy &ip)
+    sub->append("Tamanho do BPP, Preditor e BLP", [&](menu::item_proxy &ip)
     {
         inputbox ibox(fm, "", "Definir tamanhos");
         inputbox::integer size("BPB", bpb_size, 2, 10, 2);
         inputbox::integer bits("N_BITS", n_bits, 1, 3, 1);
-        if(ibox.show_modal(size, bits)){
+        inputbox::integer history("BLP History Bits", history_bits, 2, 10, 1);
+        inputbox::integer counter("BLP Counter Bits", counter_bits, 1, 3, 1);
+        if(ibox.show_modal(size, bits, history, counter)){
             bpb_size = size.value();
             n_bits = bits.value();
+            history_bits = history.value();
+            counter_bits = counter.value();
         }
     });
     sub->append("Número de Estações de Reserva",[&](menu::item_proxy ip)
@@ -174,8 +183,6 @@ int sc_main(int argc, char *argv[])
             nls = sl.value();
         }
     });
-    // Menu de ajuste dos tempos de latencia na interface
-    // Novas instrucoes devem ser adcionadas manualmente aqui
     sub->append("Tempos de latência", [&](menu::item_proxy &ip)
     {
         inputbox ibox(fm,"","Tempos de latência para instruções");
@@ -330,7 +337,7 @@ int sc_main(int argc, char *argv[])
                             i = 2;
                             is_float = true; 
                         }
-                            else 
+                        else 
                         { 
                             i = 1; 
                             is_float = false;
@@ -498,6 +505,151 @@ int sc_main(int argc, char *argv[])
                 inFile.close();
             }
     });
+
+    bench_sub->append("Factorial",[&](menu::item_proxy &ip){
+        string path = base_path + "/in/benchmarks/factorial/factorial.txt";
+        bench_name = "factorial";
+        inFile.open(path);
+        if(!add_instructions(inFile,instruction_queue,instruct))
+            show_message("Arquivo inválido","Não foi possível abrir o arquivo");
+        else
+            fila = true;
+        
+        path = base_path + "/in/benchmarks/factorial/memory.txt";
+        inFile.open(path);
+        if(!inFile.is_open())
+            show_message("Arquivo inválido","Não foi possível abrir o arquivo!");
+        else
+        {
+            int i = 0;
+            int value;
+            while(inFile >> value && i < 500)
+            {
+                memory.Set(i,std::to_string(value));
+                i++;
+            }
+            for(; i < 500 ; i++)
+            {
+                memory.Set(i,"0");
+            }
+            inFile.close();
+        }
+
+        path = base_path + "/in/benchmarks/factorial/regs.txt";
+        inFile.open(path);
+        if(!inFile.is_open())
+            show_message("Arquivo inválido","Não foi possível abrir o arquivo!");
+        else
+        {
+            auto reg_gui = reg.at(0);
+            int value,i = 0;
+            while(inFile >> value && i < 32)
+            {
+                reg_gui.at(i).text(1,std::to_string(value));
+                i++;
+            }
+            for(; i < 32 ; i++)
+                reg_gui.at(i).text(1,"0");
+            inFile.close();
+        }
+    });
+
+    bench_sub->append("Conditional Sum",[&](menu::item_proxy &ip){
+        string path = base_path + "/in/benchmarks/conditional_sum/conditional_sum.txt";
+        bench_name = "conditional_sum";
+        inFile.open(path);
+        if(!add_instructions(inFile,instruction_queue,instruct))
+            show_message("Arquivo inválido","Não foi possível abrir o arquivo");
+        else
+            fila = true;
+        
+        path = base_path + "/in/benchmarks/conditional_sum/memory.txt";
+        inFile.open(path);
+        if(!inFile.is_open())
+            show_message("Arquivo inválido","Não foi possível abrir o arquivo!");
+        else
+        {
+            int i = 0;
+            int value;
+            while(inFile >> value && i < 500)
+            {
+                memory.Set(i,std::to_string(value));
+                i++;
+            }
+            for(; i < 500 ; i++)
+            {
+                memory.Set(i,"0");
+            }
+            inFile.close();
+        }
+
+        path = base_path + "/in/benchmarks/conditional_sum/regs.txt";
+        inFile.open(path);
+        if(!inFile.is_open())
+            show_message("Arquivo inválido","Não foi possível abrir o arquivo!");
+        else
+        {
+            auto reg_gui = reg.at(0);
+            int value,i = 0;
+            while(inFile >> value && i < 32)
+            {
+                reg_gui.at(i).text(1,std::to_string(value));
+                i++;
+            }
+            for(; i < 32 ; i++)
+                reg_gui.at(i).text(1,"0");
+            inFile.close();
+        }
+    });
+
+        bench_sub->append("Nested Loop Pattern",[&](menu::item_proxy &ip){
+        string path = base_path + "/in/benchmarks/nested_loop_pattern/nested_loop_pattern.txt";
+        bench_name = "nested_loop_pattern";
+        inFile.open(path);
+        if(!add_instructions(inFile,instruction_queue,instruct))
+            show_message("Arquivo inválido","Não foi possível abrir o arquivo");
+        else
+            fila = true;
+        
+        path = base_path + "/in/benchmarks/nested_loop_pattern/memory.txt";
+        inFile.open(path);
+        if(!inFile.is_open())
+            show_message("Arquivo inválido","Não foi possível abrir o arquivo!");
+        else
+        {
+            int i = 0;
+            int value;
+            while(inFile >> value && i < 500)
+            {
+                memory.Set(i,std::to_string(value));
+                i++;
+            }
+            for(; i < 500 ; i++)
+            {
+                memory.Set(i,"0");
+            }
+            inFile.close();
+        }
+
+        path = base_path + "/in/benchmarks/nested_loop_pattern/regs.txt";
+        inFile.open(path);
+        if(!inFile.is_open())
+            show_message("Arquivo inválido","Não foi possível abrir o arquivo!");
+        else
+        {
+            auto reg_gui = reg.at(0);
+            int value,i = 0;
+            while(inFile >> value && i < 32)
+            {
+                reg_gui.at(i).text(1,std::to_string(value));
+                i++;
+            }
+            for(; i < 32 ; i++)
+                reg_gui.at(i).text(1,"0");
+            inFile.close();
+        }
+    });
+
 
     bench_sub->append("Busca Binária",[&](menu::item_proxy &ip){
         string path = base_path + "/in/benchmarks/binary_search/binary_search.txt";
@@ -867,7 +1019,6 @@ int sc_main(int argc, char *argv[])
                 case 's':
                     spec = true;
                     set_spec(plc,spec); 
-                    //spec_ip.checked(true);
                     k--;
                     break;
                 case 'l':
@@ -903,22 +1054,22 @@ int sc_main(int argc, char *argv[])
             start.enabled(false);
             clock_control.enabled(true);
             run_all.enabled(true);
-            //Desativa os menus apos inicio da execucao
             op.enabled(0,false);
             op.enabled(1,false);
             op.enabled(3,false);
-            for(int i = 0; i < 2; i++)
+            for(int i = 0; i < 3; i++)
                 spec_sub->enabled(i, false);
             for(int i = 0 ; i < 8 ; i++)
                 sub->enabled(i,false);
             for(int i = 0 ; i < 10 ; i++)
                 bench_sub->enabled(i,false);
             if(spec){
-                // Flag mode setada pela escolha no menu
                 if(mode == 1)
                     top1.rob_mode(n_bits,nadd,nmul,nls,instruct_time,instruction_queue,table,memory,reg,instruct,clock_count,rob);
                 else if(mode == 2)
                     top1.rob_mode_bpb(n_bits, bpb_size, nadd,nmul,nls,instruct_time,instruction_queue,table,memory,reg,instruct,clock_count,rob);
+                else if(mode == 3)
+                    top1.rob_mode_blp(n_bits, history_bits, counter_bits, nadd,nmul,nls,instruct_time,instruction_queue,table,memory,reg,instruct,clock_count,rob);
             }
             else
                 top1.simple_mode(nadd,nmul,nls,instruct_time,instruction_queue,table,memory,reg,instruct,clock_count);
@@ -939,14 +1090,18 @@ int sc_main(int argc, char *argv[])
     });
 
     run_all.events().click([&]{
-        // enquanto queue e rob nao estao vazios, roda ate o fim
-        while(!(top1.get_queue().queue_is_empty() && top1.get_rob().rob_is_empty())){
-            if(sc_is_running())
-                sc_start();
-        }
+            // enquanto queue e rob nao estao vazios, roda ate o fim
+            while(1){
+                if(spec && top1.get_rob_queue().queue_is_empty() && top1.get_rob().rob_is_empty())
+                    break;
+                else if (!spec && top1.get_queue().queue_is_empty())
+                    break;
+                if(sc_is_running())
+                    sc_start();
+            }
 
-        top1.metrics(cpu_freq, mode, bench_name, n_bits);
-    });
+            top1.metrics(cpu_freq, mode, bench_name, n_bits);
+        });
 
     exit.events().click([]
     {

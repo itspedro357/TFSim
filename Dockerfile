@@ -9,14 +9,16 @@ RUN apt-get update && \
     libxft-dev \
     libasound2-dev \
     libxcursor-dev \
-    git gcc g++ cmake wget
+    git gcc g++ cmake wget dos2unix
 
 # Build TFSim deps and tfsim itself
 WORKDIR /opt/TFSim
-ADD src ./src/
-ADD obj ./obj/
-COPY  Makefile get_dep.sh .
-RUN sh get_dep.sh
+COPY src ./src/
+COPY obj ./obj/
+COPY Makefile get_dep.sh ./
+RUN dos2unix get_dep.sh
+RUN bash -x get_dep.sh
+
 RUN make
 
 # Add TFsim to PATH

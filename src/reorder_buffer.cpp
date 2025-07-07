@@ -1,16 +1,20 @@
 #include <nana/gui.hpp>
 #include "reorder_buffer.hpp"
 
-reorder_buffer::reorder_buffer(sc_module_name name,unsigned int sz,unsigned int pred_size, unsigned int buffer_size, int flag_mode, nana::listbox &gui, nana::listbox::cat_proxy instr_gui): 
+reorder_buffer::reorder_buffer(sc_module_name name, unsigned int sz, unsigned int pred_size, unsigned int history_bits, unsigned int counter_bits, int flag_mode, nana::listbox &gui, nana::listbox::cat_proxy instr_gui) : 
 sc_module(name),
 tam(sz),
 flag_mode(flag_mode),
 preditor(pred_size),
-branch_prediction_buffer(buffer_size, pred_size),
+branch_prediction_buffer(pred_size, history_bits),
+predictor_blp(history_bits, counter_bits), // Alterado para usar history_bits e counter_bits
 gui_table(gui),
-instr_queue_gui(instr_gui)
+instr_queue_gui(instr_gui),
+history_bits(history_bits), // Inicializa membro
+counter_bits(counter_bits) // Inicializa membro
 {
     last_rob = 0;
+    mem_count = 0;
     branch_instr = {{"BEQ",0},{"BNE",1},{"BGTZ",2},{"BLTZ",3},{"BGEZ",4},{"BLEZ",5}};
     ptrs = new rob_slot*[tam];
     for(unsigned int i = 0 ; i < tam ; i++)
@@ -79,8 +83,6 @@ void reorder_buffer::leitura_issue()
 
         ptrs[pos]->instr_pos = std::stoi(ord[ord.size()- 2]);
         ptrs[pos]->pc = std::stoi(ord[ord.size() - 1]);
-        //cout << "PC: " << ptrs[pos]->pc << endl;
-        //cout << "instr_pos: " << ptrs[pos]->instr_pos << endl;
         if(ord[0].at(0) == 'S')
         {
             if(ord[0].at(1) == 'D'){
@@ -143,7 +145,9 @@ void reorder_buffer::leitura_issue()
                 check_value = false;
                 if(regst != 0)
                 {
-                    if(ptrs[regst-1]->ready == true)
+                    if(ptrs[regst
+
+-1]->ready == true)
                     {
                         value = std::stof(cat.at(regst-1).text(VALUE));
                         check_value = true;
@@ -166,13 +170,12 @@ void reorder_buffer::leitura_issue()
                 ptrs[pos]->destination = ord[2];
             }
             
-            // Novo modo -> Se escolhido no menu, 1 preditor entra no if
-            //se escolhido o bpb, vai pro else
             if(flag_mode == 1){
                 ptrs[pos]->prediction = preditor.predict();
-            }
-            else{
+            } else if (flag_mode == 2) {
                 ptrs[pos]->prediction = branch_prediction_buffer.bpb_predict(ptrs[pos]->pc);
+            } else if (flag_mode == 3) {
+                ptrs[pos]->prediction = predictor_blp.predict(ptrs[pos]->pc);
             }
             
             if(ptrs[pos]->prediction){
@@ -190,7 +193,6 @@ void reorder_buffer::leitura_issue()
         else if(ord[0].at(0) == 'J'){
             cat.at(pos).text(DESTINATION, ord[1]);
             ptrs[pos]->destination = ord[1];
-            //std::to_string(ptrs[pos]->entry) = ROB position
             out_iq->write("J " + std::to_string(ptrs[pos]->entry) +  ' ' + ptrs[pos]->destination);
             ptrs[pos]->ready = true;
         }
@@ -209,7 +211,6 @@ void reorder_buffer::leitura_issue()
     }
 }
 
-// Onde há o commit das instruções
 void reorder_buffer::new_rob_head() 
 {
     unsigned int instr_type;
@@ -241,8 +242,8 @@ void reorder_buffer::new_rob_head()
                 break;
             
             case 'B':
-                instr_queue_gui.at(rob_buff[0]->instr_pos).text(EXEC,std::to_string(sc_time_stamp().value() / 1000)); //text(EXEC,"X");
-                instr_queue_gui.at(rob_buff[0]->instr_pos).text(WRITE,std::to_string(sc_time_stamp().value() / 1000)); //text(WRITE,"X");
+                instr_queue_gui.at(rob_buff[0]->instr_pos).text(EXEC,std::to_string(sc_time_stamp().value() / 1000));
+                instr_queue_gui.at(rob_buff[0]->instr_pos).text(WRITE,std::to_string(sc_time_stamp().value() / 1000));
                 instr_type = branch_instr[rob_buff[0]->instruction];
                 if(instr_type < 2)
                     pred = branch(instr_type,rob_buff[0]->vj,rob_buff[0]->vk);
@@ -257,27 +258,33 @@ void reorder_buffer::new_rob_head()
                     else
                         out_iq->write("R " + std::to_string(rob_buff[0]->entry));
                     cout << "-----------------LIMPANDO ROB no ciclo " << sc_time_stamp() << " -----------------" << endl << flush;
-                    _flush(); //Esvazia o ROB
+                    _flush();
                     out_resv_adu->write("F");
                     out_slb->write("F");
                     out_rb->write("F");
                     out_adu->write("F");
                 }
 
-                cout << "Atualizando bpb" << endl << flush;
-                if(flag_mode == 1){
+                if (flag_mode == 1) {
+                    cout << "Atualizando preditor simples (1 bit)" << endl << flush;
                     preditor.update_state(pred, hit);
-                }else{
+                } else if (flag_mode == 2) {
+                    cout << "Atualizando BPB (2-bit bimodal)" << endl << flush;
                     branch_prediction_buffer.bpb_update_state(rob_buff[0]->pc, pred, hit);
-                }
+                } else if (flag_mode == 3) {
+                    cout << "Atualizando BLP (Branch Local Predictor)" << endl << flush;
+                            predictor_blp.update(rob_buff[0]->pc, pred, hit);
+                        }
+                        cout << "Commit da instrucao " << rob_buff[0]->instruction << " com taken=" << pred 
+                            << " no ciclo " << sc_time_stamp() << endl << flush;
                 break;
 
             case 'J':
-                instr_queue_gui.at(rob_buff[0]->instr_pos).text(EXEC,std::to_string(sc_time_stamp().value() / 1000)); //text(EXEC,"X");
-                instr_queue_gui.at(rob_buff[0]->instr_pos).text(WRITE,std::to_string(sc_time_stamp().value() / 1000)); //text(WRITE,"X");
+                instr_queue_gui.at(rob_buff[0]->instr_pos).text(EXEC,std::to_string(sc_time_stamp().value() / 1000));
+                instr_queue_gui.at(rob_buff[0]->instr_pos).text(WRITE,std::to_string(sc_time_stamp().value() / 1000));
                 break;
                 
-            default: // Write destination register
+            default:
                 if(rob_buff[0]->instruction.at(0) == 'L')
                     mem_count++;
                 wait(SC_ZERO_TIME);
@@ -287,7 +294,6 @@ void reorder_buffer::new_rob_head()
                     ask_status(false,rob_buff[0]->destination,0);
         }
 
-        // Remove head instruction from buffer
         if(!rob_buff.empty())
         {
             rob_buff[0]->busy = false;
@@ -316,19 +322,20 @@ void reorder_buffer::leitura_cdb()
         ord = instruction_split(p);
         index = std::stoi(ord[0]);
         value = std::stof(ord[1]);
-        check_dependencies(index,value);
+        cout << "CDB Received: Index=" << index << ", Value=" << value << endl;
+        check_dependencies(index, value);
         if(ptrs[index-1]->busy)
         {
             ptrs[index-1]->ready = true;
             ptrs[index-1]->value = value;
             if(ptrs[index-1]->destination.at(0) != 'F')
-                cat.at(index-1).text(VALUE,std::to_string((int)value));
+                cat.at(index-1).text(VALUE, std::to_string((int)value));
             else
-                cat.at(index-1).text(VALUE,std::to_string(value));
+                cat.at(index-1).text(VALUE, std::to_string(value));
             ptrs[index-1]->state = WRITE;
-            cat.at(index-1).text(STATE,"Write Result");
+            cat.at(index-1).text(STATE, "Write Result");
             if(rob_buff[0]->entry == index)
-                rob_head_value_event.notify(1,SC_NS);
+                rob_head_value_event.notify(1, SC_NS);
         }
         wait();
     }
@@ -352,13 +359,14 @@ void reorder_buffer::leitura_adu()
         {
             ptrs[index-1]->ready = true;
             cat.at(index-1).text(STATE,"Write Result");
-            instr_queue_gui.at(ptrs[index-1]->instr_pos).text(WRITE,std::to_string(sc_time_stamp().value() / 1000)); //text(WRITE,"X");
+            instr_queue_gui.at(ptrs[index-1]->instr_pos).text(WRITE,std::to_string(sc_time_stamp().value() / 1000));
         }
         if(rob_buff[0]->entry == index && ptrs[index-1]->ready)
             rob_head_value_event.notify(1,SC_NS); 
         wait();
     }
 }
+
 void reorder_buffer::check_conflict()
 {
     string p;
@@ -388,6 +396,7 @@ int reorder_buffer::busy_check()
     last_rob = (last_rob+1)%tam;
     return ret;
 }
+
 unsigned int reorder_buffer::ask_status(bool read,string reg,unsigned int pos)
 {
     string res;
@@ -401,6 +410,7 @@ unsigned int reorder_buffer::ask_status(bool read,string reg,unsigned int pos)
         out_rb->write("W S " + reg + " " + std::to_string(pos));
     return 0;
 }
+
 float reorder_buffer::ask_value(bool read,string reg,float value)
 {
     string res;
@@ -414,10 +424,12 @@ float reorder_buffer::ask_value(bool read,string reg,float value)
         out_rb->write("W V " + reg + ' ' + std::to_string(value));
     return 0;
 }
+
 void reorder_buffer::mem_write(unsigned int addr,float value,unsigned int rob_pos)
 {
     out_mem->write("S " + std::to_string(addr) + ' ' + std::to_string(value) + ' ' + std::to_string(rob_pos));
 }
+
 void reorder_buffer::check_dependencies(unsigned int index, float value)
 {
     auto cat = gui_table.at(0);
@@ -433,7 +445,7 @@ void reorder_buffer::check_dependencies(unsigned int index, float value)
                     if(ptrs[i]->destination != "")
                     {
                         cat.at(i).text(STATE,"Write Result");
-                        instr_queue_gui.at(ptrs[i]->instr_pos).text(WRITE,std::to_string(sc_time_stamp().value() / 1000)); //text(WRITE,"X");
+                        instr_queue_gui.at(ptrs[i]->instr_pos).text(WRITE,std::to_string(sc_time_stamp().value() / 1000));
                         ptrs[i]->ready = true;
                     }
                     if(rob_buff[0]->entry == index && ptrs[i]->ready)
@@ -460,9 +472,10 @@ void reorder_buffer::check_dependencies(unsigned int index, float value)
         }
     }
 }
+
 void reorder_buffer::value_check()
 {
-    string p,value;
+    string p, value;
     auto cat = gui_table.at(0);
     while(true)
     {
@@ -480,6 +493,7 @@ void reorder_buffer::value_check()
         wait();
     }
 }
+
 void reorder_buffer::_flush()
 {
     auto cat = gui_table.at(0);
@@ -498,6 +512,7 @@ void reorder_buffer::_flush()
         cat.at(i).text(VALUE,"");
     }
 }
+
 bool reorder_buffer::branch(int optype,int rs,int rt)
 {
     switch(optype)
@@ -517,6 +532,7 @@ bool reorder_buffer::branch(int optype,int rs,int rt)
             exit(1);
     }
 }
+
 bool reorder_buffer::branch(int optype,float value)
 {
     switch(optype)
@@ -556,13 +572,10 @@ int reorder_buffer::instruction_pos_finder(string p)
 }
 
 bool reorder_buffer::rob_is_empty() {
-    
     unsigned int i = tam;
-
     while(i--)
         if(ptrs[i]->busy)
             return false;
-    
     return true;
 }
 
@@ -574,6 +587,18 @@ bpb reorder_buffer::get_bpb() {
     return branch_prediction_buffer;
 }
 
-int reorder_buffer::get_mem_count(){
+blp reorder_buffer::get_blp() {
+    return predictor_blp;
+}
+
+int reorder_buffer::get_mem_count() {
     return mem_count;
+}
+
+int reorder_buffer::get_history_bits() const {
+    return history_bits;
+}
+
+int reorder_buffer::get_counter_bits() const {
+    return counter_bits;
 }
